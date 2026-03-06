@@ -1,0 +1,109 @@
+{
+  "dataset_name": "rtl_failure_dataset",
+  "description": "Synthetic RTL verification failure dataset for prioritization and analytics tasks.",
+  "row_count": 12000,
+  "file_format": "csv",
+  "columns": [
+    {
+      "name": "failure_id",
+      "type": "string",
+      "description": "Unique identifier for each failure instance.",
+      "format": "FAIL_00001"
+    },
+    {
+      "name": "module",
+      "type": "categorical",
+      "description": "Hardware module where the failure occurred.",
+      "allowed_values": [
+        "alu",
+        "cache_controller",
+        "memory_controller",
+        "uart",
+        "pcie",
+        "dram_interface",
+        "dma",
+        "branch_predictor",
+        "pipeline_controller",
+        "interrupt_controller"
+      ]
+    },
+    {
+      "name": "severity",
+      "type": "categorical",
+      "description": "Failure severity label assigned by verification triage.",
+      "allowed_values": [
+        "fatal",
+        "error",
+        "warning"
+      ]
+    },
+    {
+      "name": "coverage_drop",
+      "type": "integer",
+      "description": "Verification coverage drop caused by the failure.",
+      "range": {
+        "min": 0,
+        "max": 15
+      }
+    },
+    {
+      "name": "frequency",
+      "type": "integer",
+      "description": "Observed frequency of occurrence across regression runs.",
+      "range": {
+        "min": 1,
+        "max": 10
+      }
+    },
+    {
+      "name": "recurrence",
+      "type": "integer",
+      "description": "Number of repeat appearances after the first occurrence.",
+      "range": {
+        "min": 0,
+        "max": 5
+      }
+    },
+    {
+      "name": "fix_time",
+      "type": "integer",
+      "description": "Estimated engineering effort to fix the issue.",
+      "range": {
+        "min": 1,
+        "max": 5
+      }
+    },
+    {
+      "name": "log_message",
+      "type": "string",
+      "description": "Representative RTL regression log message tied to the failure."
+    },
+    {
+      "name": "priority",
+      "type": "integer",
+      "description": "Derived bug-fix priority from severity.",
+      "mapping": {
+        "fatal": 1,
+        "error": 2,
+        "warning": 3
+      },
+      "range": {
+        "min": 1,
+        "max": 3
+      }
+    }
+  ],
+  "generation_rules": {
+    "priority_is_derived": true,
+    "priority_mapping": {
+      "fatal": 1,
+      "error": 2,
+      "warning": 3
+    },
+    "severity_distribution_hint": {
+      "fatal": "lower frequency but highest urgency",
+      "error": "most common actionable failure class",
+      "warning": "common low-risk regression signal"
+    }
+  }
+}
