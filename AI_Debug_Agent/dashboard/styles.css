@@ -1,0 +1,103 @@
+:root {
+  --bg: #f4f7f5;
+  --ink: #14281d;
+  --muted: #4a6b59;
+  --accent: #1f7a4f;
+  --card: #ffffff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  background: radial-gradient(circle at top left, #e8f7eb, var(--bg));
+  color: var(--ink);
+}
+
+header {
+  padding: 24px;
+  border-bottom: 2px solid #d2e6d8;
+}
+
+header h1 {
+  margin: 0;
+}
+
+header p {
+  margin: 8px 0 0;
+  color: var(--muted);
+}
+
+main {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 16px;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+}
+
+.card {
+  background: var(--card);
+  border-radius: 12px;
+  box-shadow: 0 2px 10px rgba(20, 40, 29, 0.08);
+  padding: 16px;
+}
+
+.row {
+  display: flex;
+  gap: 10px;
+  margin: 8px 0;
+}
+
+button {
+  border: none;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button:hover {
+  filter: brightness(1.05);
+}
+
+textarea,
+input[type="file"] {
+  width: 100%;
+  margin-top: 8px;
+}
+
+pre {
+  background: #0f1f17;
+  color: #d9f7e5;
+  border-radius: 8px;
+  padding: 10px;
+  white-space: pre-wrap;
+}
+
+.plot {
+  width: 100%;
+  min-height: 320px;
+}
+
+@media (min-width: 900px) {
+  main {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .card:first-child,
+  .card:nth-child(2),
+  .card:nth-child(3),
+  .card:nth-child(4),
+  .card:nth-child(5),
+  .card:nth-child(6),
+  .card:nth-child(7) {
+    grid-column: span 2;
+  }
+}

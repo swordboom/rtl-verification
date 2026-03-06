@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+
+AI_Debug_Agent/dataset/*.csv
+AI_Debug_Agent/dataset/*.db
+AI_Debug_Agent/models/*.pkl

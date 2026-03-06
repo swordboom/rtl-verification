@@ -1,73 +1,25 @@
-import random
-import pandas as pd
-from log_generator import generate_log
+from pathlib import Path
 
-modules = [
-    "alu",
-    "cache_controller",
-    "memory_controller",
-    "uart",
-    "pcie",
-    "dram_interface",
-    "dma",
-    "branch_predictor",
-    "pipeline_controller",
-    "interrupt_controller"
-]
+from AI_Debug_Agent.config import DEFAULT_DATASET_PATH, DEFAULT_SQLITE_PATH
+from AI_Debug_Agent.data_ingestion_agent import DataIngestionAgent
 
-severity_levels = ["fatal", "error", "warning"]
 
-def assign_priority(severity, coverage_drop):
+def main():
+    agent = DataIngestionAgent()
+    df = agent.build_dataset_and_store(
+        row_count=12000,
+        dataset_path=DEFAULT_DATASET_PATH,
+        db_path=DEFAULT_SQLITE_PATH,
+    )
 
-    if severity == "fatal" and coverage_drop > 8:
-        return "High"
+    # Compatibility export for legacy scripts in this repo.
+    legacy_path = Path("rtl_regression_dataset.csv")
+    df.to_csv(legacy_path, index=False)
+    print(f"Dataset generated: {len(df)} rows")
+    print(f"Primary CSV: {DEFAULT_DATASET_PATH}")
+    print(f"Legacy CSV: {legacy_path.resolve()}")
+    print(f"SQLite DB: {DEFAULT_SQLITE_PATH}")
 
-    elif severity == "error" and coverage_drop > 4:
-        return "Medium"
 
-    else:
-        return "Low"
-
-data = []
-
-for i in range(10000):
-
-    module = random.choice(modules)
-    severity = random.choice(severity_levels)
-
-    coverage_drop = random.randint(0,15)
-    frequency = random.randint(1,10)
-    recurrence = random.randint(0,5)
-    fix_time = random.randint(1,5)
-
-    log_message = generate_log(module)
-
-    priority = assign_priority(severity, coverage_drop)
-
-    data.append([
-        i,
-        module,
-        severity,
-        coverage_drop,
-        frequency,
-        recurrence,
-        fix_time,
-        log_message,
-        priority
-    ])
-
-df = pd.DataFrame(data, columns=[
-    "failure_id",
-    "module",
-    "severity",
-    "coverage_drop",
-    "frequency",
-    "recurrence",
-    "fix_time",
-    "log_message",
-    "priority"
-])
-
-df.to_csv("rtl_regression_dataset.csv", index=False)
-
-print("Dataset generated successfully")
+if __name__ == "__main__":
+    main()

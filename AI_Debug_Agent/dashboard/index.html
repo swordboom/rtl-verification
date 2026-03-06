@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Debug Prioritization Dashboard</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>AI Debug Prioritization</h1>
+    <p>Upload logs, train model, predict bug priority, and inspect explainability.</p>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>System Controls</h2>
+      <div class="row">
+        <button id="train-btn">Train Model (12k rows)</button>
+        <button id="refresh-btn">Refresh Analytics</button>
+      </div>
+      <pre id="status-box">Waiting for action...</pre>
+    </section>
+
+    <section class="card">
+      <h2>Predict from Raw Log</h2>
+      <textarea id="log-input" rows="4">[ERROR] Module: MemoryCtrl assert_handshake triggered with E_MEM_TIMING at line 234. Coverage drop detected: 8%. Regression: nightly_run</textarea>
+      <div class="row">
+        <button id="predict-btn">Predict Priority</button>
+      </div>
+      <pre id="prediction-box"></pre>
+    </section>
+
+    <section class="card">
+      <h2>Upload Log File</h2>
+      <input id="log-file" type="file" accept=".log,.txt">
+      <button id="upload-btn">Upload and Score</button>
+      <pre id="upload-box"></pre>
+    </section>
+
+    <section class="card">
+      <h2>Failure Distribution (Severity)</h2>
+      <canvas id="severity-chart"></canvas>
+    </section>
+
+    <section class="card">
+      <h2>Priority Histogram</h2>
+      <div id="priority-plot" class="plot"></div>
+    </section>
+
+    <section class="card">
+      <h2>Coverage Impact by Module</h2>
+      <div id="coverage-plot" class="plot"></div>
+    </section>
+
+    <section class="card">
+      <h2>Module-Severity Heatmap</h2>
+      <div id="heatmap-plot" class="plot"></div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
