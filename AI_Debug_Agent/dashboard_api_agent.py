@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import importlib.util
 from dataclasses import dataclass
+from io import StringIO
 from pathlib import Path
 from typing import Any, Optional
 
@@ -113,6 +114,7 @@ def _ensure_required_prediction_columns(df: pd.DataFrame) -> pd.DataFrame:
         "historical_bug_count": 4,
         "avg_fix_time": 4,
         "assertion_failures": 3,
+        "error_category": "MODULE",
         "log_message": "",
     }
     for key, value in defaults.items():
@@ -127,6 +129,16 @@ def _populate_runtime_features(df: pd.DataFrame) -> pd.DataFrame:
 
     if "log_message" not in out.columns:
         out["log_message"] = ""
+    if "error_category" not in out.columns:
+        out["error_category"] = "MODULE"
+    else:
+        out["error_category"] = out["error_category"].fillna("MODULE")
+    lower_msgs = out["log_message"].fillna("").astype(str).str.lower()
+    out.loc[lower_msgs.str.contains(r"\buvm\b", regex=True), "error_category"] = "UVM"
+    out.loc[
+        lower_msgs.str.contains(r"\bsva\b|assert", regex=True),
+        "error_category",
+    ] = "SVA"
 
     signatures = (
         out["module_name"].astype(str)
@@ -457,19 +469,57 @@ def predict_from_log(payload: ParseLogRequest):
 async def upload_logs(file: UploadFile = File(...)):
     _ensure_model_ready(state)
     raw = (await file.read()).decode("utf-8", errors="ignore")
-    logs = [line.strip() for line in raw.splitlines() if line.strip()]
-    if not logs:
+    filename = (file.filename or "").lower()
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    if not lines:
         raise HTTPException(status_code=400, detail="No logs found in uploaded file.")
 
-    parsed_df = state.parser_agent.parse_logs(logs, remove_duplicates=True)
-    duplicate_count = max(0, len(logs) - len(parsed_df))
+    parsed_df: pd.DataFrame
+    total_records = 0
+    duplicate_count = 0
+
+    # CSV path: preserve row count and support structured uploads.
+    is_csv_candidate = filename.endswith(".csv") or ("," in lines[0] and len(lines[0].split(",")) >= 3)
+    if is_csv_candidate:
+        try:
+            csv_df = pd.read_csv(StringIO(raw))
+            total_records = int(len(csv_df))
+            if total_records == 0:
+                raise ValueError("empty csv")
+
+            rename_map = {
+                "module": "module_name",
+                "frequency": "failure_frequency",
+                "recurrence": "historical_bug_count",
+                "fix_time": "avg_fix_time",
+                "priority": "priority_label",
+            }
+            csv_df = csv_df.rename(columns={k: v for k, v in rename_map.items() if k in csv_df.columns})
+            parsed_df = csv_df.copy()
+
+            if "log_message" not in parsed_df.columns:
+                text_cols = [c for c in ["message", "log", "event", "description"] if c in parsed_df.columns]
+                if text_cols:
+                    parsed_df["log_message"] = parsed_df[text_cols[0]].astype(str)
+                else:
+                    parsed_df["log_message"] = parsed_df.astype(str).agg(" | ".join, axis=1)
+        except Exception:
+            parsed_df = state.parser_agent.parse_logs(lines, remove_duplicates=True)
+            total_records = int(len(lines))
+            duplicate_count = max(0, total_records - int(len(parsed_df)))
+    else:
+        parsed_df = state.parser_agent.parse_logs(lines, remove_duplicates=True)
+        total_records = int(len(lines))
+        duplicate_count = max(0, total_records - int(len(parsed_df)))
+
     if parsed_df.empty:
-        raise HTTPException(
-            status_code=400,
-            detail="No unique/valid logs found after preprocessing.",
-        )
+        raise HTTPException(status_code=400, detail="No valid records found after preprocessing.")
+
     parsed_df = _ensure_required_prediction_columns(parsed_df)
-    parsed_df["test_name"] = parsed_df.get("test_name").fillna(parsed_df["regression_suite"])
+    if "test_name" not in parsed_df.columns:
+        parsed_df["test_name"] = parsed_df["regression_suite"]
+    else:
+        parsed_df["test_name"] = parsed_df["test_name"].fillna(parsed_df["regression_suite"])
     parsed_df = _populate_runtime_features(parsed_df)
 
     x = state.feature_agent.transform(parsed_df)
@@ -530,6 +580,7 @@ async def upload_logs(file: UploadFile = File(...)):
             break
 
     uploaded_records = []
+    raw_logs = lines
     for idx, row in parsed_df.reset_index(drop=True).iterrows():
         parsed_record = row.to_dict()
         class_probs = {
@@ -546,7 +597,7 @@ async def upload_logs(file: UploadFile = File(...)):
         uploaded_records.append(
             {
                 "index": idx + 1,
-                "raw_log": logs[idx] if idx < len(logs) else parsed_record.get("log_message", ""),
+                "raw_log": raw_logs[idx] if idx < len(raw_logs) else parsed_record.get("log_message", ""),
                 "parsed": parsed_record,
                 "prediction": prediction,
             }
@@ -572,7 +623,7 @@ async def upload_logs(file: UploadFile = File(...)):
     return {
         "total_logs": len(uploaded_records),
         "preprocessing_summary": {
-            "raw_log_lines": len(logs),
+            "raw_log_lines": total_records,
             "unique_logs_after_dedup": int(len(parsed_df)),
             "duplicates_removed": int(duplicate_count),
         },

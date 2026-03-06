@@ -131,16 +131,16 @@ class LogParserAgent:
         }
 
     def parse_logs(self, logs: list[str], remove_duplicates: bool = True) -> pd.DataFrame:
-        seen_signatures = set()
+        seen_rows = set()
         records = []
         for log in logs:
             if not log or not log.strip():
                 continue
+            raw_key = log.strip()
+            if remove_duplicates and raw_key in seen_rows:
+                continue
             parsed = self.parse_log(log)
             if remove_duplicates:
-                sig = parsed.get("normalized_signature", "")
-                if sig in seen_signatures:
-                    continue
-                seen_signatures.add(sig)
+                seen_rows.add(raw_key)
             records.append(parsed)
         return pd.DataFrame(records)

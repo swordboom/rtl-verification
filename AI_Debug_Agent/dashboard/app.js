@@ -89,7 +89,14 @@ function renderCollapsibleUploadedJson(records) {
     uploadResults.textContent = "No parsed records available.";
     return;
   }
-  records.forEach((record) => {
+  const maxRender = 200;
+  const visible = records.slice(0, maxRender);
+  if (records.length > maxRender) {
+    const note = document.createElement("pre");
+    note.textContent = `Showing ${maxRender} of ${records.length} records to keep UI responsive.`;
+    uploadResults.appendChild(note);
+  }
+  visible.forEach((record) => {
     const details = document.createElement("details");
     const summary = document.createElement("summary");
     const prediction = record.prediction || {};
