@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import joblib
@@ -32,17 +33,19 @@ class PrioritizationModelAgent:
             from xgboost import XGBClassifier
 
             self.model_kind = "xgboost"
+            cpu_count = max(2, min(16, os.cpu_count() or 4))
             return XGBClassifier(
-                n_estimators=250,
-                max_depth=6,
-                learning_rate=0.07,
-                subsample=0.9,
-                colsample_bytree=0.9,
+                n_estimators=180,
+                max_depth=5,
+                learning_rate=0.1,
+                subsample=0.85,
+                colsample_bytree=0.85,
                 objective="multi:softprob",
                 num_class=num_classes,
                 random_state=self.random_state,
                 eval_metric="mlogloss",
-                n_jobs=4,
+                tree_method="hist",
+                n_jobs=cpu_count,
             )
         except Exception:
             from sklearn.ensemble import HistGradientBoostingClassifier

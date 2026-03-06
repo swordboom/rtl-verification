@@ -14,6 +14,7 @@ PERCENT_PATTERN = re.compile(r"([0-9]+(?:\.[0-9]+)?)%")
 REGRESSION_PATTERN = re.compile(r"Regression:\s*([A-Za-z0-9_\-]+)", re.IGNORECASE)
 LINE_PATTERN = re.compile(r"line\s*([0-9]+)", re.IGNORECASE)
 TEST_PATTERN = re.compile(r"Test:\s*([A-Za-z0-9_\-./]+)", re.IGNORECASE)
+TOKEN_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_\-]*")
 
 ASSERTION_TOKENS = [
     "assert_stable",
@@ -65,6 +66,15 @@ class LogParserAgent:
                 return severity
         return "warning"
 
+    @staticmethod
+    def tokenize_log(log: str) -> list[str]:
+        return [token.lower() for token in TOKEN_PATTERN.findall(log)]
+
+    @staticmethod
+    def _normalized_log_signature(log: str) -> str:
+        tokens = LogParserAgent.tokenize_log(log)
+        return " ".join(tokens)
+
     def parse_log(self, log: str) -> dict[str, Any]:
         severity_match = SEVERITY_PATTERN.search(log)
         module_match = MODULE_PATTERN.search(log)
@@ -102,6 +112,7 @@ class LogParserAgent:
         elif percent_match:
             coverage_drop = float(percent_match.group(1))
 
+        tokens = self.tokenize_log(log)
         return {
             "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
             "module_name": module_name,
@@ -113,9 +124,23 @@ class LogParserAgent:
             "test_name": test_match.group(1) if test_match else None,
             "error_category": error_category,
             "line_no": int(line_match.group(1)) if line_match else -1,
+            "token_count": len(tokens),
+            "tokens": tokens,
+            "normalized_signature": self._normalized_log_signature(log),
             "log_message": log.strip(),
         }
 
-    def parse_logs(self, logs: list[str]) -> pd.DataFrame:
-        records = [self.parse_log(log) for log in logs if log and log.strip()]
+    def parse_logs(self, logs: list[str], remove_duplicates: bool = True) -> pd.DataFrame:
+        seen_signatures = set()
+        records = []
+        for log in logs:
+            if not log or not log.strip():
+                continue
+            parsed = self.parse_log(log)
+            if remove_duplicates:
+                sig = parsed.get("normalized_signature", "")
+                if sig in seen_signatures:
+                    continue
+                seen_signatures.add(sig)
+            records.append(parsed)
         return pd.DataFrame(records)

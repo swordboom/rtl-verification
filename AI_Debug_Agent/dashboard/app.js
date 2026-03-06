@@ -3,10 +3,12 @@ const predictionBox = document.getElementById("prediction-box");
 const uploadBox = document.getElementById("upload-box");
 const uploadResults = document.getElementById("upload-results");
 const severityCanvas = document.getElementById("severity-chart");
+const moduleFilter = document.getElementById("module-filter");
 const apiBase = "";
 
 let severityChart = null;
 let analyticsSource = "auto";
+let knownModules = new Set();
 
 function setStatus(text) {
   statusBox.textContent = text;
@@ -14,6 +16,20 @@ function setStatus(text) {
 
 function pretty(obj) {
   return JSON.stringify(obj, null, 2);
+}
+
+function updateModuleFilterOptions(modules) {
+  modules.forEach((m) => knownModules.add(m));
+  const current = moduleFilter.value;
+  const sorted = Array.from(knownModules).sort();
+  moduleFilter.innerHTML = '<option value="">All Modules</option>';
+  sorted.forEach((moduleName) => {
+    const opt = document.createElement("option");
+    opt.value = moduleName;
+    opt.textContent = moduleName;
+    moduleFilter.appendChild(opt);
+  });
+  moduleFilter.value = sorted.includes(current) ? current : "";
 }
 
 async function trainModel() {
@@ -157,9 +173,15 @@ function drawHeatmap(heatmap) {
 
 async function loadAnalytics(source = "auto") {
   setStatus("Loading analytics...");
-  const res = await fetch(`${apiBase}/analytics?source=${encodeURIComponent(source)}`);
+  const moduleName = moduleFilter.value || "";
+  const res = await fetch(
+    `${apiBase}/analytics?source=${encodeURIComponent(source)}&module_name=${encodeURIComponent(moduleName)}`
+  );
   const data = await res.json();
   setStatus(pretty({ source: data.source, rows: data.rows, columns: data.columns }));
+  if (Array.isArray(data.coverage_by_module)) {
+    updateModuleFilterOptions(data.coverage_by_module.map((x) => x.module_name));
+  }
   drawSeverityChart(data.severity_distribution);
   drawPriorityHistogram(data.priority_distribution);
   drawCoveragePlot(data.coverage_by_module);
@@ -181,5 +203,8 @@ document.getElementById("refresh-btn").addEventListener("click", async () => {
 });
 document.getElementById("predict-btn").addEventListener("click", predictFromLog);
 document.getElementById("upload-btn").addEventListener("click", uploadLogs);
+moduleFilter.addEventListener("change", async () => {
+  await loadAnalytics(analyticsSource);
+});
 
 init();

@@ -135,13 +135,59 @@ Open:
 ## API Endpoints
 
 - `GET /health` -> service and artifact status
+- `GET /runtime-status` -> verifies XGBoost, SHAP, MiniLM, model/pipeline readiness
 - `POST /train` -> generate dataset + train model
+  - Optional body field: `speed_profile` = `fast` (recommended for 10k-100k logs) or `balanced`
 - `POST /parse-log` -> parse raw log into structured fields
 - `POST /predict` -> predict from structured payload
 - `POST /predict-from-log` -> parse + predict from raw log
 - `POST /upload-logs` -> batch score uploaded `.log/.txt` file
 - `GET /analytics` -> distributions, heatmap data, trends, clustering, git insights
+  - Optional query params: `source=auto|uploaded|dataset`, `module_name=<module>`
+- `GET /evaluation-report` -> generates formal workflow-aligned evaluation report
 - `GET /demo-scenario` -> manual vs AI demo comparison
+
+## Workflow Alignment Features
+
+- Deduplication preprocessing for uploaded logs (`duplicates_removed` in upload response)
+- Tokenization and normalized signatures from parser
+- UVM/SVA/MODULE categorization
+- Prioritized failure list sorted by descending score
+- Categorized error summary and suggested debug starting points
+- Impact analysis (tests affected and module impact)
+- Related recent design/testbench change hints from git history
+- Dashboard module filter for analytics drilldown
+
+## Generate Formal Evaluation Report
+
+From CLI:
+
+```bash
+python -m AI_Debug_Agent.evaluation_report --rows 12000
+```
+
+Generated files:
+
+- `reports/workflow_evaluation_report.json`
+- `reports/workflow_evaluation_report.md`
+
+The report includes:
+
+- Reduction in debug effort
+- Clustering and categorization quality
+- Clarity of prioritization logic
+- Core model metrics (Precision/Recall/F1/NDCG)
+- Alternative ranking check (LambdaMART-style pairwise ranker via `XGBRanker`, if available)
+
+## Performance Mode (10k to 100k logs)
+
+- Use `POST /train` with:
+  - `{"row_count": 12000, "speed_profile": "fast"}`
+- Fast profile forces scalable feature settings:
+  - Early switch to TF-IDF for text features
+  - Larger vectorization capacity
+  - Batched model inference during log upload
+- For very large uploads (50k-100k), keep model trained with `speed_profile=fast` before using `/upload-logs`.
 
 ## Priority Model + Score
 

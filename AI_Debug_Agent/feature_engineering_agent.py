@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from math import ceil
 from pathlib import Path
 from typing import Optional
 
@@ -36,10 +37,14 @@ class FeatureEngineeringAgent:
         use_text_embeddings: bool = True,
         embedding_model_name: str = "all-MiniLM-L6-v2",
         max_tfidf_features: int = 128,
+        large_input_threshold: int = 10000,
+        embedding_batch_size: int = 256,
     ):
         self.use_text_embeddings = use_text_embeddings
         self.embedding_model_name = embedding_model_name
         self.max_tfidf_features = max_tfidf_features
+        self.large_input_threshold = large_input_threshold
+        self.embedding_batch_size = embedding_batch_size
 
         self.numeric_features = [
             "coverage_drop",
@@ -95,6 +100,23 @@ class FeatureEngineeringAgent:
             remainder="drop",
         )
 
+    def _encode_unique_messages(self, messages: pd.Series) -> np.ndarray:
+        msg_list = messages.astype(str).tolist()
+        unique_msgs, inverse_idx = np.unique(np.array(msg_list, dtype=object), return_inverse=True)
+        n_batches = max(1, ceil(len(unique_msgs) / self.embedding_batch_size))
+        chunks = np.array_split(unique_msgs, n_batches)
+        parts = []
+        for chunk in chunks:
+            emb = self.text_model.encode(
+                chunk.tolist(),
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
+            parts.append(emb)
+        unique_embeddings = np.vstack(parts) if parts else np.zeros((0, 0))
+        return unique_embeddings[inverse_idx]
+
     def add_engineered_features(self, df: pd.DataFrame) -> pd.DataFrame:
         out = df.copy()
         out["severity"] = out["severity"].fillna("warning").str.lower()
@@ -123,17 +145,23 @@ class FeatureEngineeringAgent:
             self.text_feature_names = []
             return np.zeros((len(messages), 0))
 
+        if len(messages) >= self.large_input_threshold:
+            self.tfidf_vectorizer = TfidfVectorizer(
+                max_features=self.max_tfidf_features, ngram_range=(1, 2)
+            )
+            tfidf = self.tfidf_vectorizer.fit_transform(messages.astype(str))
+            self.text_backend = "tfidf"
+            self.text_feature_names = [
+                f"tfidf_{term}" for term in self.tfidf_vectorizer.get_feature_names_out()
+            ]
+            return self._to_dense(tfidf)
+
         try:
             self._silence_tensorflow_logging()
             from sentence_transformers import SentenceTransformer
 
             self.text_model = SentenceTransformer(self.embedding_model_name)
-            embeddings = self.text_model.encode(
-                messages.astype(str).tolist(),
-                convert_to_numpy=True,
-                normalize_embeddings=True,
-                show_progress_bar=False,
-            )
+            embeddings = self._encode_unique_messages(messages)
             self.text_backend = "sentence_transformers"
             self.text_feature_names = [f"emb_{idx:03d}" for idx in range(embeddings.shape[1])]
             return embeddings
@@ -158,12 +186,7 @@ class FeatureEngineeringAgent:
                 from sentence_transformers import SentenceTransformer
 
                 self.text_model = SentenceTransformer(self.embedding_model_name)
-            return self.text_model.encode(
-                messages.astype(str).tolist(),
-                convert_to_numpy=True,
-                normalize_embeddings=True,
-                show_progress_bar=False,
-            )
+            return self._encode_unique_messages(messages)
 
         if self.text_backend == "tfidf":
             if self.tfidf_vectorizer is None:
@@ -209,6 +232,8 @@ class FeatureEngineeringAgent:
             "use_text_embeddings": self.use_text_embeddings,
             "embedding_model_name": self.embedding_model_name,
             "max_tfidf_features": self.max_tfidf_features,
+            "large_input_threshold": self.large_input_threshold,
+            "embedding_batch_size": self.embedding_batch_size,
             "numeric_features": self.numeric_features,
             "categorical_features": self.categorical_features,
             "base_feature_order": self.base_feature_order,
@@ -227,6 +252,8 @@ class FeatureEngineeringAgent:
             use_text_embeddings=artifact["use_text_embeddings"],
             embedding_model_name=artifact["embedding_model_name"],
             max_tfidf_features=artifact["max_tfidf_features"],
+            large_input_threshold=artifact.get("large_input_threshold", 10000),
+            embedding_batch_size=artifact.get("embedding_batch_size", 256),
         )
         agent.numeric_features = artifact["numeric_features"]
         agent.categorical_features = artifact["categorical_features"]

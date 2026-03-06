@@ -22,6 +22,7 @@ from .config import (
 )
 from .data_ingestion_agent import DataIngestionAgent
 from .explanation_agent import ExplanationAgent
+from .evaluation_report import generate_evaluation_report
 from .feature_engineering_agent import FeatureEngineeringAgent
 from .log_parser_agent import LogParserAgent
 from .prioritization_model_agent import PrioritizationModelAgent
@@ -32,6 +33,7 @@ os.environ.setdefault("LOKY_MAX_CPU_COUNT", "4")
 
 class TrainRequest(BaseModel):
     row_count: int = Field(default=12000, ge=10000, le=50000)
+    speed_profile: str = Field(default="fast")
 
 
 class ParseLogRequest(BaseModel):
@@ -169,26 +171,48 @@ def _populate_runtime_features(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _analytics_payload(df: pd.DataFrame) -> dict[str, Any]:
-    severity_dist = df["severity"].value_counts().to_dict()
+def _analytics_payload(df: pd.DataFrame, module_filter: Optional[str] = None) -> dict[str, Any]:
+    source_df = df.copy()
+    if module_filter:
+        source_df = source_df[source_df["module_name"].astype(str) == module_filter]
+        if source_df.empty:
+            return {
+                "rows": 0,
+                "columns": df.columns.tolist(),
+                "module_filter": module_filter,
+                "severity_distribution": {},
+                "priority_distribution": {},
+                "coverage_by_module": [],
+                "module_severity_heatmap": {"modules": [], "severities": [], "values": []},
+                "trend_detection": [],
+                "cluster_profile": [],
+                "git_fix_insights": state.explanation_agent.git_fix_insights(
+                    Path(__file__).resolve().parent.parent
+                ),
+            }
+
+    severity_dist = source_df["severity"].value_counts().to_dict()
     priority_dist = (
-        df["priority_label"].value_counts().to_dict() if "priority_label" in df.columns else {}
+        source_df["priority_label"].value_counts().to_dict()
+        if "priority_label" in source_df.columns
+        else {}
     )
     coverage_by_module = (
-        df.groupby("module_name")["coverage_drop"]
+        source_df.groupby("module_name")["coverage_drop"]
         .mean()
         .round(2)
         .sort_values(ascending=False)
         .reset_index(name="avg_coverage_drop")
         .to_dict(orient="records")
     )
-    heatmap = pd.crosstab(df["module_name"], df["severity"])
-    trends = state.explanation_agent.detect_module_trends(df)
-    clusters = state.explanation_agent.cluster_failures(df.head(2000))
+    heatmap = pd.crosstab(source_df["module_name"], source_df["severity"])
+    trends = state.explanation_agent.detect_module_trends(source_df)
+    clusters = state.explanation_agent.cluster_failures(source_df.head(2000))
     git_insights = state.explanation_agent.git_fix_insights(Path(__file__).resolve().parent.parent)
     return {
-        "rows": int(len(df)),
-        "columns": df.columns.tolist(),
+        "rows": int(len(source_df)),
+        "columns": source_df.columns.tolist(),
+        "module_filter": module_filter,
         "severity_distribution": severity_dist,
         "priority_distribution": priority_dist,
         "coverage_by_module": coverage_by_module,
@@ -267,6 +291,25 @@ def _runtime_component_status() -> dict[str, Any]:
     return status
 
 
+def _predict_in_batches(x: np.ndarray, batch_size: int = 8192):
+    labels_all = []
+    scores_all = []
+    probs_all = []
+    total = len(x)
+    if total == 0:
+        return np.array([]), np.array([]), np.zeros((0, 0))
+
+    for start in range(0, total, batch_size):
+        end = min(start + batch_size, total)
+        labels, scores, probs = state.model_agent.predict(x[start:end])
+        labels_all.extend(labels.tolist() if hasattr(labels, "tolist") else list(labels))
+        scores_all.extend(scores.tolist() if hasattr(scores, "tolist") else list(scores))
+        probs_all.append(probs)
+
+    probabilities = np.vstack(probs_all) if probs_all else np.zeros((0, 0))
+    return np.array(labels_all), np.array(scores_all), probabilities
+
+
 state = _build_state()
 app = FastAPI(title="AI Debug Prioritization Agent", version="1.0.0")
 
@@ -309,6 +352,24 @@ def health():
 
 @app.post("/train")
 def train(request: TrainRequest):
+    if request.speed_profile not in {"fast", "balanced"}:
+        raise HTTPException(status_code=400, detail="speed_profile must be fast or balanced")
+
+    if request.speed_profile == "fast":
+        state.feature_agent = FeatureEngineeringAgent(
+            use_text_embeddings=True,
+            max_tfidf_features=256,
+            large_input_threshold=4000,
+            embedding_batch_size=512,
+        )
+    else:
+        state.feature_agent = FeatureEngineeringAgent(
+            use_text_embeddings=True,
+            max_tfidf_features=256,
+            large_input_threshold=12000,
+            embedding_batch_size=256,
+        )
+
     df = state.ingestion_agent.build_dataset_and_store(
         row_count=request.row_count,
         dataset_path=DEFAULT_DATASET_PATH,
@@ -321,6 +382,8 @@ def train(request: TrainRequest):
     state.explanation_agent = ExplanationAgent(state.model_agent)
     return {
         "rows": len(df),
+        "speed_profile": request.speed_profile,
+        "text_backend": state.feature_agent.text_backend,
         "dataset_path": str(DEFAULT_DATASET_PATH),
         "sqlite_path": str(DEFAULT_SQLITE_PATH),
         "model_path": str(DEFAULT_MODEL_PATH),
@@ -398,13 +461,19 @@ async def upload_logs(file: UploadFile = File(...)):
     if not logs:
         raise HTTPException(status_code=400, detail="No logs found in uploaded file.")
 
-    parsed_df = state.parser_agent.parse_logs(logs)
+    parsed_df = state.parser_agent.parse_logs(logs, remove_duplicates=True)
+    duplicate_count = max(0, len(logs) - len(parsed_df))
+    if parsed_df.empty:
+        raise HTTPException(
+            status_code=400,
+            detail="No unique/valid logs found after preprocessing.",
+        )
     parsed_df = _ensure_required_prediction_columns(parsed_df)
     parsed_df["test_name"] = parsed_df.get("test_name").fillna(parsed_df["regression_suite"])
     parsed_df = _populate_runtime_features(parsed_df)
 
     x = state.feature_agent.transform(parsed_df)
-    labels, scores, probabilities = state.model_agent.predict(x)
+    labels, scores, probabilities = _predict_in_batches(x, batch_size=8192)
     enriched_df = parsed_df.copy()
     enriched_df["priority_label"] = labels
     calibrated_scores = []
@@ -502,6 +571,11 @@ async def upload_logs(file: UploadFile = File(...)):
 
     return {
         "total_logs": len(uploaded_records),
+        "preprocessing_summary": {
+            "raw_log_lines": len(logs),
+            "unique_logs_after_dedup": int(len(parsed_df)),
+            "duplicates_removed": int(duplicate_count),
+        },
         "uploaded_records": uploaded_records,
         "prioritized_failure_list": sorted(
             [
@@ -528,11 +602,14 @@ async def upload_logs(file: UploadFile = File(...)):
 
 
 @app.get("/analytics")
-def analytics(source: str = Query(default="auto")):
+def analytics(
+    source: str = Query(default="auto"),
+    module_name: Optional[str] = Query(default=None),
+):
     if source not in {"auto", "uploaded", "dataset"}:
         raise HTTPException(status_code=400, detail="source must be one of: auto, uploaded, dataset")
     if source in ("auto", "uploaded") and state.uploaded_logs_df is not None:
-        payload = _analytics_payload(state.uploaded_logs_df)
+        payload = _analytics_payload(state.uploaded_logs_df, module_filter=module_name)
         payload["source"] = "uploaded"
         return payload
 
@@ -542,7 +619,7 @@ def analytics(source: str = Query(default="auto")):
     if not DEFAULT_DATASET_PATH.exists():
         raise HTTPException(status_code=404, detail="Dataset not found. Run /train first.")
     df = pd.read_csv(DEFAULT_DATASET_PATH)
-    payload = _analytics_payload(df)
+    payload = _analytics_payload(df, module_filter=module_name)
     payload["source"] = "dataset"
     return payload
 
@@ -572,3 +649,9 @@ def demo_scenario():
 @app.get("/runtime-status")
 def runtime_status():
     return _runtime_component_status()
+
+
+@app.get("/evaluation-report")
+def evaluation_report(rows: int = Query(default=12000, ge=1000, le=50000)):
+    report = generate_evaluation_report(rows=rows)
+    return report
