@@ -57,18 +57,17 @@ class ExplanationAgent:
 
         if self._ensure_shap():
             shap_values = self._shap_explainer.shap_values(x)
-            if isinstance(shap_values, list):
-                class_index = int(np.argmax(probabilities[0]))
-                values = shap_values[class_index][0]
-            else:
-                values = shap_values[0]
+            class_index = int(np.argmax(probabilities[0]))
+            values = self._select_shap_vector(shap_values, class_index=class_index)
 
-            ranked = np.argsort(np.abs(values))[::-1][:top_k]
+            ranked = np.asarray(np.argsort(np.abs(values))[::-1][:top_k]).reshape(-1)
             response["top_factors"] = [
                 {
-                    "feature": feature_names[idx] if idx < len(feature_names) else f"f_{idx}",
-                    "contribution": round(float(values[idx]), 4),
-                    "direction": "increase" if values[idx] >= 0 else "decrease",
+                    "feature": feature_names[int(idx)]
+                    if int(idx) < len(feature_names)
+                    else f"f_{int(idx)}",
+                    "contribution": round(float(values[int(idx)]), 4),
+                    "direction": "increase" if float(values[int(idx)]) >= 0 else "decrease",
                 }
                 for idx in ranked
             ]
@@ -88,19 +87,64 @@ class ExplanationAgent:
             ]
         return response
 
+    @staticmethod
+    def _select_shap_vector(shap_values: Any, class_index: int) -> np.ndarray:
+        """Normalize SHAP outputs to a 1D feature-contribution vector."""
+        if isinstance(shap_values, list):
+            selected = np.asarray(shap_values[class_index])
+            if selected.ndim >= 2:
+                return selected[0].reshape(-1)
+            return selected.reshape(-1)
+
+        arr = np.asarray(shap_values)
+        if arr.ndim == 1:
+            return arr.reshape(-1)
+        if arr.ndim == 2:
+            return arr[0].reshape(-1)
+        if arr.ndim == 3:
+            # Common multi-class format: (n_samples, n_features, n_classes)
+            if arr.shape[2] > class_index:
+                return arr[0, :, class_index].reshape(-1)
+            # Alternate format: (n_classes, n_samples, n_features)
+            if arr.shape[0] > class_index:
+                return arr[class_index, 0, :].reshape(-1)
+
+        return arr.reshape(-1)
+
     def suggest_root_cause(self, record: dict[str, Any]) -> str:
         module = str(record.get("module_name", "")).lower()
         error_code = str(record.get("error_code", "")).upper()
         assertion = str(record.get("assertion_type", "")).lower()
+        log_text = str(record.get("log_message", "")).lower()
 
-        if "cache" in module or "COHERENCY" in error_code:
+        if "cache" in module or "COHERENCY" in error_code or "cache" in log_text:
             return "Possible cache coherency issue under invalidation/writeback race."
-        if "memory" in module or "REFRESH" in error_code:
+        if (
+            "memory" in module
+            or "REFRESH" in error_code
+            or "memory" in log_text
+            or "stale read" in log_text
+            or "page fault" in log_text
+        ):
             return "Possible memory timing/refresh window issue causing stale reads."
-        if "pcie" in module or "LTSSM" in error_code:
+        if (
+            "pcie" in module
+            or "LTSSM" in error_code
+            or "network" in log_text
+            or "nic" in log_text
+            or "link down" in log_text
+        ):
             return "Possible PCIe link training or protocol state transition instability."
-        if "dma" in module or "DMA" in error_code:
+        if "dma" in module or "DMA" in error_code or "disk" in log_text or "io" in log_text:
             return "Possible DMA descriptor alignment/count mismatch in burst transfer path."
+        if "uart" in module or "serial" in log_text or "com port" in log_text:
+            return "Possible UART framing/parity issue or FIFO overrun under burst traffic."
+        if "timeout" in log_text or "hung" in log_text or "deadlock" in log_text:
+            return "Possible handshake deadlock or timeout due to missing ready/ack transition."
+        if "overflow" in log_text or "underflow" in log_text:
+            return "Possible buffer boundary handling issue causing overflow/underflow condition."
+        if "permission" in log_text or "access denied" in log_text:
+            return "Possible privilege or access-control path mismatch in system integration."
         if assertion == "assert_ordering":
             return "Ordering assertion indicates scoreboard mismatch across pipeline stages."
         if assertion == "assert_handshake":
@@ -156,9 +200,27 @@ class ExplanationAgent:
         if not numeric_cols or df.empty:
             return {"cluster_profile": [], "clustered_preview": []}
 
-        clusters = min(max(2, n_clusters), len(df))
         matrix = df[numeric_cols].fillna(0.0).to_numpy()
         scaled = StandardScaler().fit_transform(matrix)
+        distinct_points = np.unique(np.round(scaled, decimals=8), axis=0)
+        distinct_count = int(distinct_points.shape[0])
+
+        # Avoid convergence warnings for tiny/duplicate uploaded samples.
+        if distinct_count <= 1:
+            out = df.copy()
+            out["cluster_id"] = 0
+            profile = (
+                out.groupby("cluster_id")[numeric_cols]
+                .mean()
+                .round(3)
+                .assign(cluster_size=out.groupby("cluster_id").size())
+                .reset_index()
+                .to_dict(orient="records")
+            )
+            preview = out.head(25).to_dict(orient="records")
+            return {"cluster_profile": profile, "clustered_preview": preview}
+
+        clusters = min(max(2, n_clusters), len(df), distinct_count)
         kmeans = KMeans(n_clusters=clusters, random_state=42, n_init=10)
         labels = kmeans.fit_predict(scaled)
 

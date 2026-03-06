@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import os
+import importlib.util
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+import numpy as np
 import pandas as pd
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -22,6 +25,9 @@ from .explanation_agent import ExplanationAgent
 from .feature_engineering_agent import FeatureEngineeringAgent
 from .log_parser_agent import LogParserAgent
 from .prioritization_model_agent import PrioritizationModelAgent
+
+# Avoid loky CPU-core detection warning on Windows systems without `wmic`.
+os.environ.setdefault("LOKY_MAX_CPU_COUNT", "4")
 
 
 class TrainRequest(BaseModel):
@@ -54,6 +60,7 @@ class AgentState:
     feature_agent: FeatureEngineeringAgent
     model_agent: PrioritizationModelAgent
     explanation_agent: ExplanationAgent
+    uploaded_logs_df: Optional[pd.DataFrame] = None
 
 
 def _build_state() -> AgentState:
@@ -88,6 +95,176 @@ def _payload_to_dict(payload: BaseModel) -> dict[str, Any]:
 def _ensure_model_ready(state: AgentState):
     if state.model_agent.model is None or state.feature_agent.preprocessor is None:
         raise HTTPException(status_code=400, detail="Model is not trained. Call /train first.")
+
+
+def _ensure_required_prediction_columns(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    defaults = {
+        "timestamp": pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "module_name": "MemoryCtrl",
+        "error_code": "E_UNKNOWN",
+        "severity": "error",
+        "coverage_drop": 0.0,
+        "assertion_type": "assert_stable",
+        "regression_suite": "nightly_run",
+        "failure_frequency": 10,
+        "historical_bug_count": 4,
+        "avg_fix_time": 4,
+        "assertion_failures": 3,
+        "log_message": "",
+    }
+    for key, value in defaults.items():
+        if key not in out.columns:
+            out[key] = value
+    return out
+
+
+def _populate_runtime_features(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    severity_weight = {"fatal": 1.0, "error": 0.65, "warning": 0.35}
+
+    if "log_message" not in out.columns:
+        out["log_message"] = ""
+
+    signatures = (
+        out["module_name"].astype(str)
+        + "|"
+        + out["error_code"].astype(str)
+        + "|"
+        + out["assertion_type"].astype(str)
+    )
+    signature_count = signatures.value_counts()
+    msg_lengths = out["log_message"].fillna("").str.len().to_numpy(dtype=float)
+    word_counts = out["log_message"].fillna("").str.split().str.len().fillna(0).to_numpy(dtype=float)
+    numeric_counts = out["log_message"].fillna("").str.count(r"\d+").to_numpy(dtype=float)
+    severity_factor = (
+        out["severity"].astype(str).str.lower().map(severity_weight).fillna(0.4).to_numpy(dtype=float)
+    )
+
+    inferred_freq = np.clip(np.round(4 + severity_factor * 18 + np.log1p(word_counts) * 6), 1, 50).astype(int)
+    inferred_hist = np.clip(
+        np.round(1 + severity_factor * 8 + np.minimum(numeric_counts, 8) * 0.7),
+        0,
+        15,
+    ).astype(int)
+    inferred_fix = np.clip(np.round(1 + severity_factor * 6 + np.log1p(msg_lengths) * 0.4), 1, 10).astype(int)
+    inferred_assertions = np.clip(
+        np.round(1 + severity_factor * 8 + np.minimum(word_counts, 40) * 0.15),
+        0,
+        20,
+    ).astype(int)
+
+    out["failure_frequency"] = inferred_freq
+    out["historical_bug_count"] = inferred_hist
+    out["avg_fix_time"] = inferred_fix
+    out["assertion_failures"] = inferred_assertions
+
+    out["failure_frequency"] = out["failure_frequency"] + signatures.map(signature_count).fillna(1).astype(int) - 1
+    out["failure_frequency"] = out["failure_frequency"].clip(1, 50)
+
+    if "coverage_drop" in out.columns:
+        inferred_cov = np.clip(np.round(severity_factor * 10 + np.log1p(msg_lengths) * 0.8, 2), 0, 20)
+        out["coverage_drop"] = np.where(out["coverage_drop"].astype(float) <= 0.0, inferred_cov, out["coverage_drop"])
+
+    return out
+
+
+def _analytics_payload(df: pd.DataFrame) -> dict[str, Any]:
+    severity_dist = df["severity"].value_counts().to_dict()
+    priority_dist = (
+        df["priority_label"].value_counts().to_dict() if "priority_label" in df.columns else {}
+    )
+    coverage_by_module = (
+        df.groupby("module_name")["coverage_drop"]
+        .mean()
+        .round(2)
+        .sort_values(ascending=False)
+        .reset_index(name="avg_coverage_drop")
+        .to_dict(orient="records")
+    )
+    heatmap = pd.crosstab(df["module_name"], df["severity"])
+    trends = state.explanation_agent.detect_module_trends(df)
+    clusters = state.explanation_agent.cluster_failures(df.head(2000))
+    git_insights = state.explanation_agent.git_fix_insights(Path(__file__).resolve().parent.parent)
+    return {
+        "rows": int(len(df)),
+        "columns": df.columns.tolist(),
+        "severity_distribution": severity_dist,
+        "priority_distribution": priority_dist,
+        "coverage_by_module": coverage_by_module,
+        "module_severity_heatmap": {
+            "modules": heatmap.index.tolist(),
+            "severities": heatmap.columns.tolist(),
+            "values": heatmap.values.tolist(),
+        },
+        "trend_detection": trends,
+        "cluster_profile": clusters["cluster_profile"],
+        "git_fix_insights": git_insights,
+    }
+
+
+def _calibrate_priority_score(model_score: float, row: dict[str, Any], class_probabilities: dict[str, float]) -> float:
+    coverage = float(row.get("coverage_drop", 0.0))
+    frequency = float(row.get("failure_frequency", 0.0))
+    historical = float(row.get("historical_bug_count", 0.0))
+    fix_time = float(row.get("avg_fix_time", 0.0))
+    assertions = float(row.get("assertion_failures", 0.0))
+    severity = str(row.get("severity", "warning")).lower()
+
+    impact = (
+        (coverage / 20.0) * 0.30
+        + (frequency / 50.0) * 0.25
+        + (historical / 15.0) * 0.20
+        + (fix_time / 10.0) * 0.15
+        + (assertions / 20.0) * 0.10
+    ) * 100.0
+    confidence = (max(class_probabilities.values()) if class_probabilities else 0.0) * 100.0
+    severity_adjust = {"fatal": 8.0, "error": 0.0, "warning": -6.0}.get(severity, 0.0)
+
+    score = (0.60 * float(model_score)) + (0.30 * impact) + (0.10 * confidence) + severity_adjust
+    return round(float(np.clip(score, 0.0, 100.0)), 2)
+
+
+def _runtime_component_status() -> dict[str, Any]:
+    def module_available(name: str) -> bool:
+        return importlib.util.find_spec(name) is not None
+
+    status = {
+        "xgboost_installed": module_available("xgboost"),
+        "shap_installed": module_available("shap"),
+        "sentence_transformers_installed": module_available("sentence_transformers"),
+        "model_loaded": state.model_agent.model is not None,
+        "model_kind": state.model_agent.model_kind or "uninitialized",
+        "feature_pipeline_loaded": state.feature_agent.preprocessor is not None,
+        "embedding_backend": state.feature_agent.text_backend or "unknown",
+    }
+
+    # Optional deep checks.
+    try:
+        if status["shap_installed"] and status["model_loaded"]:
+            status["shap_ready"] = bool(state.explanation_agent._ensure_shap())
+        else:
+            status["shap_ready"] = False
+    except Exception:
+        status["shap_ready"] = False
+
+    try:
+        if status["sentence_transformers_installed"]:
+            from sentence_transformers import SentenceTransformer
+
+            probe = SentenceTransformer("all-MiniLM-L6-v2")
+            emb = probe.encode(["health check"], convert_to_numpy=True, show_progress_bar=False)
+            status["minilm_model_loaded"] = bool(getattr(emb, "shape", (0,))[0] == 1)
+            status["minilm_embedding_dim"] = int(emb.shape[1]) if len(emb.shape) == 2 else None
+        else:
+            status["minilm_model_loaded"] = False
+            status["minilm_embedding_dim"] = None
+    except Exception as exc:
+        status["minilm_model_loaded"] = False
+        status["minilm_embedding_dim"] = None
+        status["minilm_error"] = str(exc)
+
+    return status
 
 
 state = _build_state()
@@ -182,25 +359,34 @@ def predict(payload: PredictRequest):
 def predict_from_log(payload: ParseLogRequest):
     _ensure_model_ready(state)
     parsed = state.parser_agent.parse_log(payload.log)
-    defaults = {
-        "failure_frequency": 10,
-        "historical_bug_count": 4,
-        "avg_fix_time": 4,
-        "assertion_failures": 3,
-    }
-    record = {**defaults, **parsed}
-    df = _prepare_predict_frame(record)
+    df = _prepare_predict_frame(parsed)
+    df = _ensure_required_prediction_columns(df)
+    df = _populate_runtime_features(df)
+    record = df.iloc[0].to_dict()
     x = state.feature_agent.transform(df)
     labels, scores, probabilities = state.model_agent.predict(x)
+    class_probs = {
+        label: round(float(prob), 4)
+        for label, prob in zip(state.model_agent.label_encoder.classes_, probabilities[0])
+    }
+    calibrated_score = _calibrate_priority_score(float(scores[0]), record, class_probs)
+
+    enriched = df.copy()
+    enriched["priority_label"] = labels
+    enriched["priority_score"] = calibrated_score
+    state.uploaded_logs_df = (
+        enriched
+        if state.uploaded_logs_df is None
+        else pd.concat([state.uploaded_logs_df, enriched], ignore_index=True).tail(2000)
+    )
+
     return {
         "parsed": parsed,
         "predicted_priority_label": labels[0],
-        "priority_score": float(scores[0]),
-        "class_probabilities": {
-            label: round(float(prob), 4)
-            for label, prob in zip(state.model_agent.label_encoder.classes_, probabilities[0])
-        },
+        "priority_score": calibrated_score,
+        "class_probabilities": class_probs,
         "root_cause_suggestion": state.explanation_agent.suggest_root_cause(record),
+        "analytics_source": "uploaded",
     }
 
 
@@ -213,70 +399,152 @@ async def upload_logs(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="No logs found in uploaded file.")
 
     parsed_df = state.parser_agent.parse_logs(logs)
-    parsed_df["failure_frequency"] = 10
-    parsed_df["historical_bug_count"] = 4
-    parsed_df["avg_fix_time"] = 4
-    parsed_df["assertion_failures"] = 3
+    parsed_df = _ensure_required_prediction_columns(parsed_df)
+    parsed_df["test_name"] = parsed_df.get("test_name").fillna(parsed_df["regression_suite"])
+    parsed_df = _populate_runtime_features(parsed_df)
 
     x = state.feature_agent.transform(parsed_df)
     labels, scores, probabilities = state.model_agent.predict(x)
-    results = []
-    for idx, row in parsed_df.reset_index(drop=True).iterrows():
-        results.append(
-            {
-                "log_message": row["log_message"],
-                "module_name": row["module_name"],
-                "severity": row["severity"],
-                "predicted_priority_label": labels[idx],
-                "priority_score": float(scores[idx]),
-                "class_probabilities": {
-                    label: round(float(prob), 4)
-                    for label, prob in zip(state.model_agent.label_encoder.classes_, probabilities[idx])
-                },
-                "root_cause_suggestion": state.explanation_agent.suggest_root_cause(row.to_dict()),
-            }
+    enriched_df = parsed_df.copy()
+    enriched_df["priority_label"] = labels
+    calibrated_scores = []
+    for idx in range(len(enriched_df)):
+        probs = {
+            label: float(prob)
+            for label, prob in zip(state.model_agent.label_encoder.classes_, probabilities[idx])
+        }
+        calibrated_scores.append(
+            _calibrate_priority_score(float(scores[idx]), enriched_df.iloc[idx].to_dict(), probs)
         )
-    return {"total_logs": len(results), "results": results}
+    enriched_df["priority_score"] = calibrated_scores
+    state.uploaded_logs_df = enriched_df.sort_values("priority_score", ascending=False).copy()
 
-
-@app.get("/analytics")
-def analytics():
-    if not DEFAULT_DATASET_PATH.exists():
-        raise HTTPException(status_code=404, detail="Dataset not found. Run /train first.")
-
-    df = pd.read_csv(DEFAULT_DATASET_PATH)
-    severity_dist = df["severity"].value_counts().to_dict()
-    priority_dist = df["priority_label"].value_counts().to_dict()
-
-    coverage_by_module = (
-        df.groupby("module_name")["coverage_drop"]
-        .mean()
-        .round(2)
-        .sort_values(ascending=False)
-        .reset_index(name="avg_coverage_drop")
+    unique_failure_cols = ["module_name", "error_code", "severity", "assertion_type", "error_category"]
+    unique_failures = (
+        enriched_df.groupby(unique_failure_cols, dropna=False)
+        .size()
+        .reset_index(name="occurrences")
+        .sort_values("occurrences", ascending=False)
         .to_dict(orient="records")
     )
 
-    heatmap = pd.crosstab(df["module_name"], df["severity"])
-    trends = state.explanation_agent.detect_module_trends(df)
-    clusters = state.explanation_agent.cluster_failures(df.head(2000))
-    git_insights = state.explanation_agent.git_fix_insights(Path(__file__).resolve().parent.parent)
+    categorized_summary = (
+        enriched_df.groupby("error_category")
+        .size()
+        .reset_index(name="count")
+        .sort_values("count", ascending=False)
+        .to_dict(orient="records")
+    )
+
+    impact_analysis = (
+        enriched_df.groupby(["module_name", "priority_label"], dropna=False)
+        .agg(
+            tests_affected=("test_name", "nunique"),
+            avg_priority_score=("priority_score", "mean"),
+            total_failures=("module_name", "size"),
+        )
+        .reset_index()
+        .sort_values(["avg_priority_score", "tests_affected"], ascending=[False, False])
+    )
+    impact_analysis["avg_priority_score"] = impact_analysis["avg_priority_score"].round(2)
+
+    git_changes = state.explanation_agent.git_fix_insights(Path(__file__).resolve().parent.parent)
+    recent_messages = git_changes.get("recent_fix_messages", [])
+    module_names = {str(m).lower() for m in enriched_df["module_name"].dropna().unique().tolist()}
+    related_recent_changes = []
+    for item in recent_messages:
+        msg = item.get("message", "")
+        msg_lower = msg.lower()
+        if any(module in msg_lower for module in module_names):
+            related_recent_changes.append(item)
+        if len(related_recent_changes) >= 8:
+            break
+
+    uploaded_records = []
+    for idx, row in parsed_df.reset_index(drop=True).iterrows():
+        parsed_record = row.to_dict()
+        class_probs = {
+            label: round(float(prob), 4)
+            for label, prob in zip(state.model_agent.label_encoder.classes_, probabilities[idx])
+        }
+        calibrated = float(calibrated_scores[idx])
+        prediction = {
+            "predicted_priority_label": labels[idx],
+            "priority_score": calibrated,
+            "class_probabilities": class_probs,
+            "root_cause_suggestion": state.explanation_agent.suggest_root_cause(parsed_record),
+        }
+        uploaded_records.append(
+            {
+                "index": idx + 1,
+                "raw_log": logs[idx] if idx < len(logs) else parsed_record.get("log_message", ""),
+                "parsed": parsed_record,
+                "prediction": prediction,
+            }
+        )
+    uploaded_records = sorted(
+        uploaded_records,
+        key=lambda item: float(item["prediction"]["priority_score"]),
+        reverse=True,
+    )
+
+    top_debug_start_points = []
+    for record in unique_failures[:6]:
+        top_debug_start_points.append(
+            {
+                "module_name": record.get("module_name"),
+                "error_code": record.get("error_code"),
+                "severity": record.get("severity"),
+                "occurrences": int(record.get("occurrences", 0)),
+                "suggested_start": state.explanation_agent.suggest_root_cause(record),
+            }
+        )
 
     return {
-        "rows": int(len(df)),
-        "columns": df.columns.tolist(),
-        "severity_distribution": severity_dist,
-        "priority_distribution": priority_dist,
-        "coverage_by_module": coverage_by_module,
-        "module_severity_heatmap": {
-            "modules": heatmap.index.tolist(),
-            "severities": heatmap.columns.tolist(),
-            "values": heatmap.values.tolist(),
-        },
-        "trend_detection": trends,
-        "cluster_profile": clusters["cluster_profile"],
-        "git_fix_insights": git_insights,
+        "total_logs": len(uploaded_records),
+        "uploaded_records": uploaded_records,
+        "prioritized_failure_list": sorted(
+            [
+                {
+                    "module_name": row["module_name"],
+                    "error_code": row["error_code"],
+                    "severity": row["severity"],
+                    "priority_label": row["priority_label"],
+                    "priority_score": round(float(row["priority_score"]), 2),
+                    "error_category": row.get("error_category"),
+                }
+                for _, row in state.uploaded_logs_df.iterrows()
+            ],
+            key=lambda item: item["priority_score"],
+            reverse=True,
+        ),
+        "categorized_error_summary": categorized_summary,
+        "unique_failures": unique_failures,
+        "impact_analysis": impact_analysis.to_dict(orient="records"),
+        "suggested_starting_points": top_debug_start_points,
+        "related_recent_changes": related_recent_changes,
+        "analytics_source": "uploaded",
     }
+
+
+@app.get("/analytics")
+def analytics(source: str = Query(default="auto")):
+    if source not in {"auto", "uploaded", "dataset"}:
+        raise HTTPException(status_code=400, detail="source must be one of: auto, uploaded, dataset")
+    if source in ("auto", "uploaded") and state.uploaded_logs_df is not None:
+        payload = _analytics_payload(state.uploaded_logs_df)
+        payload["source"] = "uploaded"
+        return payload
+
+    if source == "uploaded" and state.uploaded_logs_df is None:
+        raise HTTPException(status_code=404, detail="No uploaded log analytics available yet.")
+
+    if not DEFAULT_DATASET_PATH.exists():
+        raise HTTPException(status_code=404, detail="Dataset not found. Run /train first.")
+    df = pd.read_csv(DEFAULT_DATASET_PATH)
+    payload = _analytics_payload(df)
+    payload["source"] = "dataset"
+    return payload
 
 
 @app.get("/demo-scenario")
@@ -299,3 +567,8 @@ def demo_scenario():
             "time_seconds": 10,
         },
     }
+
+
+@app.get("/runtime-status")
+def runtime_status():
+    return _runtime_component_status()

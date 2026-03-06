@@ -81,6 +81,24 @@ pre {
   white-space: pre-wrap;
 }
 
+.collapsible-list {
+  display: grid;
+  gap: 8px;
+}
+
+.collapsible-list details {
+  border: 1px solid #d2e6d8;
+  border-radius: 8px;
+  background: #fbfffc;
+  padding: 8px;
+}
+
+.collapsible-list summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #1c5c3b;
+}
+
 .plot {
   width: 100%;
   min-height: 320px;

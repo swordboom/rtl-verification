@@ -1,10 +1,12 @@
 const statusBox = document.getElementById("status-box");
 const predictionBox = document.getElementById("prediction-box");
 const uploadBox = document.getElementById("upload-box");
+const uploadResults = document.getElementById("upload-results");
 const severityCanvas = document.getElementById("severity-chart");
 const apiBase = "";
 
 let severityChart = null;
+let analyticsSource = "auto";
 
 function setStatus(text) {
   statusBox.textContent = text;
@@ -23,7 +25,8 @@ async function trainModel() {
   });
   const data = await res.json();
   setStatus(pretty(data));
-  await loadAnalytics();
+  analyticsSource = "dataset";
+  await loadAnalytics(analyticsSource);
 }
 
 async function predictFromLog() {
@@ -36,6 +39,8 @@ async function predictFromLog() {
   });
   const data = await res.json();
   predictionBox.textContent = pretty(data);
+  analyticsSource = data.analytics_source || "uploaded";
+  await loadAnalytics(analyticsSource);
 }
 
 async function uploadLogs() {
@@ -52,7 +57,34 @@ async function uploadLogs() {
     body: formData,
   });
   const data = await res.json();
-  uploadBox.textContent = pretty(data);
+  uploadBox.textContent = pretty({
+    total_logs: data.total_logs,
+    categorized_error_summary: data.categorized_error_summary,
+    unique_failures_top: (data.unique_failures || []).slice(0, 5),
+  });
+  renderCollapsibleUploadedJson(data.uploaded_records || []);
+  analyticsSource = data.analytics_source || "uploaded";
+  await loadAnalytics(analyticsSource);
+}
+
+function renderCollapsibleUploadedJson(records) {
+  uploadResults.innerHTML = "";
+  if (!records.length) {
+    uploadResults.textContent = "No parsed records available.";
+    return;
+  }
+  records.forEach((record) => {
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    const prediction = record.prediction || {};
+    const parsed = record.parsed || {};
+    summary.textContent = `#${record.index} | ${parsed.module_name || "Unknown"} | ${prediction.predicted_priority_label || "-"} | Score ${prediction.priority_score || "-"}`;
+    const content = document.createElement("pre");
+    content.textContent = pretty(record);
+    details.appendChild(summary);
+    details.appendChild(content);
+    uploadResults.appendChild(details);
+  });
 }
 
 function drawSeverityChart(distribution) {
@@ -123,11 +155,11 @@ function drawHeatmap(heatmap) {
   );
 }
 
-async function loadAnalytics() {
+async function loadAnalytics(source = "auto") {
   setStatus("Loading analytics...");
-  const res = await fetch(`${apiBase}/analytics`);
+  const res = await fetch(`${apiBase}/analytics?source=${encodeURIComponent(source)}`);
   const data = await res.json();
-  setStatus(pretty({ rows: data.rows, columns: data.columns }));
+  setStatus(pretty({ source: data.source, rows: data.rows, columns: data.columns }));
   drawSeverityChart(data.severity_distribution);
   drawPriorityHistogram(data.priority_distribution);
   drawCoveragePlot(data.coverage_by_module);
@@ -139,12 +171,14 @@ async function init() {
   const health = await healthRes.json();
   setStatus(pretty(health));
   if (health.model_ready && health.dataset_exists) {
-    await loadAnalytics();
+    await loadAnalytics(analyticsSource);
   }
 }
 
 document.getElementById("train-btn").addEventListener("click", trainModel);
-document.getElementById("refresh-btn").addEventListener("click", loadAnalytics);
+document.getElementById("refresh-btn").addEventListener("click", async () => {
+  await loadAnalytics(analyticsSource);
+});
 document.getElementById("predict-btn").addEventListener("click", predictFromLog);
 document.getElementById("upload-btn").addEventListener("click", uploadLogs);
 

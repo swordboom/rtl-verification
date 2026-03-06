@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -11,6 +12,10 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 from .config import DEFAULT_FEATURE_PIPELINE_PATH
+
+# Keep sentence-transformers on the PyTorch path and reduce TensorFlow log noise.
+os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 
 
 class FeatureEngineeringAgent:
@@ -65,6 +70,17 @@ class FeatureEngineeringAgent:
     def _to_dense(x: np.ndarray) -> np.ndarray:
         return x.toarray() if hasattr(x, "toarray") else x
 
+    @staticmethod
+    def _silence_tensorflow_logging() -> None:
+        try:
+            import tensorflow as tf
+
+            tf.get_logger().setLevel("ERROR")
+            if hasattr(tf, "compat") and hasattr(tf.compat, "v1") and hasattr(tf.compat.v1, "logging"):
+                tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
+        except Exception:
+            pass
+
     def _build_preprocessor(self) -> ColumnTransformer:
         try:
             encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
@@ -108,6 +124,7 @@ class FeatureEngineeringAgent:
             return np.zeros((len(messages), 0))
 
         try:
+            self._silence_tensorflow_logging()
             from sentence_transformers import SentenceTransformer
 
             self.text_model = SentenceTransformer(self.embedding_model_name)
@@ -137,6 +154,7 @@ class FeatureEngineeringAgent:
 
         if self.text_backend == "sentence_transformers":
             if self.text_model is None:
+                self._silence_tensorflow_logging()
                 from sentence_transformers import SentenceTransformer
 
                 self.text_model = SentenceTransformer(self.embedding_model_name)
