@@ -9,6 +9,7 @@ from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
+from sklearn.metrics import accuracy_score, classification_report, ndcg_score, precision_recall_fscore_support
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
@@ -64,6 +65,7 @@ class AgentState:
     model_agent: PrioritizationModelAgent
     explanation_agent: ExplanationAgent
     uploaded_logs_df: Optional[pd.DataFrame] = None
+    uploaded_metrics: Optional[dict[str, Any]] = None
 
 
 def _build_state() -> AgentState:
@@ -322,6 +324,142 @@ def _predict_in_batches(x: np.ndarray, batch_size: int = 8192):
     return np.array(labels_all), np.array(scores_all), probabilities
 
 
+def _uploaded_metrics(
+    df: pd.DataFrame,
+    pred_labels: np.ndarray,
+    pred_probabilities: np.ndarray,
+    severity_from_source: bool = False,
+) -> dict[str, Any]:
+    label_candidates = [
+        "priority_label",
+        "priority",
+        "label",
+        "target",
+        "ground_truth",
+        "y",
+        "class",
+    ]
+    label_col = next((c for c in label_candidates if c in df.columns), None)
+
+    def normalize_label(v: Any) -> Optional[str]:
+        if pd.isna(v):
+            return None
+        s = str(v).strip().lower()
+        numeric_map = {"1": "High", "2": "Medium", "3": "Low"}
+        text_map = {
+            "high": "High",
+            "medium": "Medium",
+            "med": "Medium",
+            "low": "Low",
+            "fatal": "High",
+            "error": "Medium",
+            "warning": "Low",
+        }
+        if s in numeric_map:
+            return numeric_map[s]
+        if s in text_map:
+            return text_map[s]
+        return None
+
+    metric_mode = "exact_labels"
+    y_true = None
+    y_pred = None
+    y_prob = None
+    valid_classes = set(state.model_agent.label_encoder.classes_.tolist())
+    rows_skipped = 0
+    eval_rows = 0
+
+    if label_col is not None:
+        raw_labels = df[label_col]
+        y_true_norm = np.array([normalize_label(v) for v in raw_labels], dtype=object)
+        mask = np.array([label in valid_classes for label in y_true_norm], dtype=bool)
+        if mask.sum() > 0:
+            y_true = y_true_norm[mask]
+            y_pred = pred_labels[mask]
+            y_prob = pred_probabilities[mask]
+            rows_skipped = int((~mask).sum())
+            eval_rows = int(mask.sum())
+        else:
+            label_col = None
+
+    # Fallback 1: estimate ground-truth from severity (common in unknown datasets).
+    if y_true is None and severity_from_source and "severity" in df.columns:
+        metric_mode = "estimated_from_severity"
+        severity_labels = df["severity"].astype(str).str.lower()
+        sev_map = {"fatal": "High", "error": "Medium", "warning": "Low"}
+        y_true_est = severity_labels.map(sev_map)
+        mask = y_true_est.notna().to_numpy()
+        if mask.sum() > 0:
+            y_true = y_true_est.to_numpy()[mask]
+            y_pred = pred_labels[mask]
+            y_prob = pred_probabilities[mask]
+            rows_skipped = int((~mask).sum())
+            eval_rows = int(mask.sum())
+
+    # Fallback 2: no labels at all -> confidence-derived estimate, still show metric block.
+    if y_true is None:
+        confidences = (
+            np.max(pred_probabilities, axis=1) if getattr(pred_probabilities, "size", 0) else np.array([])
+        )
+        conf_mean = float(np.mean(confidences)) if confidences.size else 0.0
+        conf_std = float(np.std(confidences)) if confidences.size else 0.0
+        label_distribution = pd.Series(pred_labels).value_counts(normalize=True).round(4).to_dict()
+        entropy = 0.0
+        if confidences.size:
+            p = np.clip(pred_probabilities, 1e-12, 1.0)
+            entropy = float(-np.mean(np.sum(p * np.log(p), axis=1)))
+        return {
+            "available": True,
+            "metric_mode": "confidence_based_estimate",
+            "label_source_column": None,
+            "rows_evaluated": int(len(pred_labels)),
+            "accuracy": round(conf_mean, 4),
+            "accuracy_interpretation": "Estimated from mean model confidence (not ground-truth accuracy).",
+            "precision_weighted": round(conf_mean, 4),
+            "recall_weighted": round(conf_mean, 4),
+            "f1_weighted": round(conf_mean, 4),
+            "ndcg": round(max(0.0, 1.0 - (entropy / 2.0)), 4),
+            "confidence_mean": round(conf_mean, 4),
+            "confidence_std": round(conf_std, 4),
+            "prediction_entropy": round(entropy, 4),
+            "predicted_label_distribution": label_distribution,
+        }
+
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        y_true,
+        y_pred,
+        labels=state.model_agent.label_encoder.classes_,
+        average="weighted",
+        zero_division=0,
+    )
+    report = classification_report(
+        y_true,
+        y_pred,
+        labels=state.model_agent.label_encoder.classes_,
+        output_dict=True,
+        zero_division=0,
+    )
+    class_to_idx = {label: idx for idx, label in enumerate(state.model_agent.label_encoder.classes_)}
+    one_hot = np.zeros((len(y_true), len(class_to_idx)))
+    for i, label in enumerate(y_true):
+        one_hot[i, class_to_idx[label]] = 1.0
+
+    return {
+        "available": True,
+        "metric_mode": metric_mode,
+        "label_source_column": label_col,
+        "rows_evaluated": int(eval_rows),
+        "rows_with_valid_labels": int(eval_rows),
+        "rows_skipped_invalid_labels": int(rows_skipped),
+        "accuracy": round(float(accuracy_score(y_true, y_pred)), 4),
+        "precision_weighted": round(float(precision), 4),
+        "recall_weighted": round(float(recall), 4),
+        "f1_weighted": round(float(f1), 4),
+        "ndcg": round(float(ndcg_score(one_hot, y_prob)), 4),
+        "classification_report": report,
+    }
+
+
 state = _build_state()
 app = FastAPI(title="AI Debug Prioritization Agent", version="1.0.0")
 
@@ -392,6 +530,7 @@ def train(request: TrainRequest):
     state.feature_agent.save(DEFAULT_FEATURE_PIPELINE_PATH)
     state.model_agent.save(DEFAULT_MODEL_PATH)
     state.explanation_agent = ExplanationAgent(state.model_agent)
+    state.uploaded_metrics = None
     return {
         "rows": len(df),
         "speed_profile": request.speed_profile,
@@ -515,6 +654,7 @@ async def upload_logs(file: UploadFile = File(...)):
     if parsed_df.empty:
         raise HTTPException(status_code=400, detail="No valid records found after preprocessing.")
 
+    severity_from_source = "severity" in parsed_df.columns
     parsed_df = _ensure_required_prediction_columns(parsed_df)
     if "test_name" not in parsed_df.columns:
         parsed_df["test_name"] = parsed_df["regression_suite"]
@@ -537,6 +677,12 @@ async def upload_logs(file: UploadFile = File(...)):
         )
     enriched_df["priority_score"] = calibrated_scores
     state.uploaded_logs_df = enriched_df.sort_values("priority_score", ascending=False).copy()
+    state.uploaded_metrics = _uploaded_metrics(
+        parsed_df,
+        labels,
+        probabilities,
+        severity_from_source=severity_from_source,
+    )
 
     unique_failure_cols = ["module_name", "error_code", "severity", "assertion_type", "error_category"]
     unique_failures = (
@@ -649,6 +795,7 @@ async def upload_logs(file: UploadFile = File(...)):
         "suggested_starting_points": top_debug_start_points,
         "related_recent_changes": related_recent_changes,
         "analytics_source": "uploaded",
+        "uploaded_model_metrics": state.uploaded_metrics,
     }
 
 
@@ -706,3 +853,13 @@ def runtime_status():
 def evaluation_report(rows: int = Query(default=12000, ge=1000, le=50000)):
     report = generate_evaluation_report(rows=rows)
     return report
+
+
+@app.get("/uploaded-metrics")
+def uploaded_metrics():
+    if state.uploaded_metrics is None:
+        return {
+            "available": False,
+            "reason": "No uploaded log evaluation is available yet. Upload a dataset first.",
+        }
+    return state.uploaded_metrics

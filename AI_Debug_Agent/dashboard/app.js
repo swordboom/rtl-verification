@@ -2,6 +2,7 @@ const statusBox = document.getElementById("status-box");
 const predictionBox = document.getElementById("prediction-box");
 const uploadBox = document.getElementById("upload-box");
 const uploadResults = document.getElementById("upload-results");
+const uploadedMetricsBox = document.getElementById("uploaded-metrics-box");
 const severityCanvas = document.getElementById("severity-chart");
 const moduleFilter = document.getElementById("module-filter");
 const apiBase = "";
@@ -16,6 +17,28 @@ function setStatus(text) {
 
 function pretty(obj) {
   return JSON.stringify(obj, null, 2);
+}
+
+function renderUploadedMetrics(metrics) {
+  if (!metrics || metrics.available === false) {
+    uploadedMetricsBox.textContent = pretty(
+      metrics || { available: false, reason: "No uploaded metrics available." }
+    );
+    return;
+  }
+
+  const mode = metrics.metric_mode || "unknown";
+  let interpretation = "True ground-truth evaluation.";
+  if (mode === "estimated_from_severity") {
+    interpretation =
+      "Proxy evaluation from severity mapping (fatal/error/warning -> High/Medium/Low). Not true ground-truth accuracy.";
+  } else if (mode === "confidence_based_estimate") {
+    interpretation =
+      "No labels provided. Accuracy is confidence-derived estimate, not ground-truth accuracy.";
+  }
+
+  uploadedMetricsBox.textContent =
+    `Evaluation Mode: ${mode}\nInterpretation: ${interpretation}\n\n` + pretty(metrics);
 }
 
 function updateModuleFilterOptions(modules) {
@@ -79,6 +102,9 @@ async function uploadLogs() {
     unique_failures_top: (data.unique_failures || []).slice(0, 5),
   });
   renderCollapsibleUploadedJson(data.uploaded_records || []);
+  renderUploadedMetrics(
+    data.uploaded_model_metrics || { available: false, reason: "No uploaded metrics available." }
+  );
   analyticsSource = data.analytics_source || "uploaded";
   await loadAnalytics(analyticsSource);
 }
@@ -202,6 +228,9 @@ async function init() {
   if (health.model_ready && health.dataset_exists) {
     await loadAnalytics(analyticsSource);
   }
+  const metricsRes = await fetch(`${apiBase}/uploaded-metrics`);
+  const metrics = await metricsRes.json();
+  renderUploadedMetrics(metrics);
 }
 
 document.getElementById("train-btn").addEventListener("click", trainModel);

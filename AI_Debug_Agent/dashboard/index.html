@@ -41,10 +41,16 @@
 
     <section class="card">
       <h2>Upload Log File</h2>
-      <input id="log-file" type="file" accept=".log,.txt">
+      <input id="log-file" type="file" accept=".log,.txt,.csv">
       <button id="upload-btn">Upload and Score</button>
       <pre id="upload-box"></pre>
       <div id="upload-results" class="collapsible-list"></div>
+    </section>
+
+    <section class="card">
+      <h2>Uploaded Data Metrics</h2>
+      <p>Shown separately when uploaded data contains ground-truth `priority_label`.</p>
+      <pre id="uploaded-metrics-box">No uploaded metrics yet.</pre>
     </section>
 
     <section class="card">
