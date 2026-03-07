@@ -1,94 +1,61 @@
-# AI Debug Prioritization Agent for RTL Verification
+# AI Debug Prioritization Agent (RTL Verification)
 
-This project builds a modular AI coding-agent style system that parses RTL regression failures, engineers features, predicts bug priority, explains predictions, and serves a dashboard/API for hackathon demos.
+AI-based system for parsing regression logs, prioritizing failures, generating explainable scores, and visualizing analytics for hackathon/demo workflows.
 
-## What This Solves
+## Overview
 
-Manual RTL triage is slow and inconsistent. This system automates:
+This project provides:
 
-- Parsing raw verification logs into structured failure records.
-- Scoring failures with a priority label (`High`, `Medium`, `Low`) and priority score (`0-100`).
-- Explaining why a bug was prioritized (SHAP where available).
-- Visualizing failure distributions and trends.
+- Synthetic RTL failure dataset generation (10k-50k+ rows).
+- Log/CSV upload ingestion for real-world datasets.
+- Failure prioritization (`High`/`Medium`/`Low`) with `priority_score` (`0-100`).
+- Explainability (SHAP when available) and root-cause hints.
+- Dashboard analytics (severity distribution, priority histogram, heatmap, coverage impact).
+- Workflow-aligned evaluation report generation.
 
 ## Tech Stack
 
-- Backend: Python, FastAPI, Pandas, scikit-learn, XGBoost, SHAP
-- AI + NLP: Sentence Transformers (`all-MiniLM-L6-v2`) with TF-IDF fallback
-- Database: SQLite (default hackathon option)
+- Backend: Python, FastAPI, Pandas, NumPy, scikit-learn, XGBoost, SHAP
+- NLP: sentence-transformers (`all-MiniLM-L6-v2`) with TF-IDF fallback/fast mode
+- Storage: SQLite + CSV
 - Frontend: HTML + JavaScript
-- Visualization: Chart.js, Plotly, Seaborn-ready data outputs
+- Charts: Chart.js + Plotly
 
-## Project Architecture
+## Project Structure
 
 ```text
 rtl-verification/
-├── AI_Debug_Agent/
-│   ├── __init__.py
-│   ├── config.py
-│   ├── data_ingestion_agent.py
-│   ├── log_parser_agent.py
-│   ├── feature_engineering_agent.py
-│   ├── prioritization_model_agent.py
-│   ├── explanation_agent.py
-│   ├── dashboard_api_agent.py
-│   ├── run_pipeline.py
-│   ├── dataset/
-│   │   ├── rtl_dataset.csv
-│   │   └── rtl_failures.db
-│   ├── models/
-│   │   ├── xgboost_model.pkl
-│   │   └── feature_pipeline.pkl
-│   └── dashboard/
-│       ├── index.html
-│       ├── app.js
-│       └── styles.css
-├── backend/
-│   ├── main.py
-│   ├── model.py
-│   ├── parser.py
-│   ├── feature_engineering.py
-│   └── explainability.py
-├── dataset_builder.py
-├── train_model.py
-└── requirements.txt
+  AI_Debug_Agent/
+    __init__.py
+    config.py
+    data_ingestion_agent.py
+    log_parser_agent.py
+    feature_engineering_agent.py
+    prioritization_model_agent.py
+    explanation_agent.py
+    dashboard_api_agent.py
+    run_pipeline.py
+    evaluation_report.py
+    dashboard/
+      index.html
+      app.js
+      styles.css
+    dataset/
+      .gitkeep
+    models/
+      .gitkeep
+  backend/
+    main.py
+    model.py
+    parser.py
+    feature_engineering.py
+    explainability.py
+  dataset_builder.py
+  train_model.py
+  requirements.txt
 ```
 
-## Agent Modules
-
-- `data_ingestion_agent.py`: Generates synthetic RTL failures (10k-50k), writes CSV + SQLite.
-- `log_parser_agent.py`: Parses logs like:
-  - `[ERROR] Module: MemoryCtrl ... Coverage drop detected: 8%. Regression: nightly_run`
-- `feature_engineering_agent.py`: Builds tabular features + text embeddings, normalizes, encodes categories.
-- `prioritization_model_agent.py`: Trains XGBoost classifier and outputs class probabilities + priority score.
-- `explanation_agent.py`: SHAP-based explanations, root-cause hints, trend detection, clustering, git-fix insights.
-- `dashboard_api_agent.py`: FastAPI endpoints for train/predict/analytics/dashboard.
-
-## Synthetic Dataset Schema
-
-Generated columns include:
-
-- `failure_id`
-- `timestamp`
-- `module_name`
-- `error_code`
-- `severity`
-- `coverage_drop`
-- `failure_frequency`
-- `historical_bug_count`
-- `avg_fix_time`
-- `assertion_type`
-- `regression_suite`
-- `assertion_failures`
-- `log_message`
-- `priority_label`
-- `priority_score`
-
-Severity-conditioned distributions bias fatal failures toward higher impact values.
-
 ## Setup
-
-1. Create environment and install dependencies:
 
 ```bash
 python -m venv .venv
@@ -96,135 +63,127 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-2. Optional: build dataset only:
+## Quick Start
 
-```bash
-python dataset_builder.py
-```
-
-3. Optional: train model from script:
-
-```bash
-python train_model.py
-```
-
-## Run Full Pipeline
+1. Train model + generate artifacts:
 
 ```bash
 python -m AI_Debug_Agent.run_pipeline --rows 12000
 ```
 
-This generates:
-
-- `AI_Debug_Agent/dataset/rtl_dataset.csv`
-- `AI_Debug_Agent/dataset/rtl_failures.db`
-- `AI_Debug_Agent/models/xgboost_model.pkl`
-- `AI_Debug_Agent/models/feature_pipeline.pkl`
-
-## Run API + Dashboard
+2. Start API and dashboard:
 
 ```bash
 uvicorn AI_Debug_Agent.dashboard_api_agent:app --reload
 ```
 
-Open:
+3. Open:
 
-- Dashboard UI: `http://127.0.0.1:8000/dashboard/index.html`
-- OpenAPI docs: `http://127.0.0.1:8000/docs`
+- Dashboard: `http://127.0.0.1:8000/dashboard/index.html`
+- API docs: `http://127.0.0.1:8000/docs`
+
+## Training Profiles (Large Scale)
+
+`POST /train` accepts:
+
+- `row_count`: `10000` to `50000`
+- `speed_profile`: `fast` or `balanced`
+
+Use `fast` for high-volume uploads (10k-100k logs). It is optimized for throughput and switches earlier to scalable TF-IDF text features.
+
+Example:
+
+```json
+{
+  "row_count": 12000,
+  "speed_profile": "fast"
+}
+```
+
+## Upload Behavior
+
+`POST /upload-logs` supports:
+
+- `.log`, `.txt`: line-wise parsing with dedup of exact duplicate lines
+- `.csv`: structured ingestion preserving row counts
+
+Preprocessing summary is returned:
+
+- `raw_log_lines`
+- `unique_logs_after_dedup`
+- `duplicates_removed`
+
+## Uploaded Dataset Metrics (Separate Panel)
+
+Uploaded metrics are available via:
+
+- `GET /uploaded-metrics`
+- `uploaded_model_metrics` in upload response
+
+Metrics run in 3 modes:
+
+1. `exact_labels`
+   - Uses labels from `priority_label`, `priority`, `label`, `target`, `ground_truth`, `y`, `class`.
+   - Supports mappings: `High/Medium/Low`, `1/2/3`, `fatal/error/warning`.
+
+2. `estimated_from_severity`
+   - Proxy labels from uploaded `severity` column.
+   - Not true ground-truth accuracy.
+
+3. `confidence_based_estimate`
+   - No labels available; uses model confidence/entropy estimates.
+   - Not true ground-truth accuracy.
 
 ## API Endpoints
 
-- `GET /health` -> service and artifact status
-- `GET /runtime-status` -> verifies XGBoost, SHAP, MiniLM, model/pipeline readiness
-- `POST /train` -> generate dataset + train model
-  - Optional body field: `speed_profile` = `fast` (recommended for 10k-100k logs) or `balanced`
-- `POST /parse-log` -> parse raw log into structured fields
-- `POST /predict` -> predict from structured payload
-- `POST /predict-from-log` -> parse + predict from raw log
-- `POST /upload-logs` -> batch score uploaded `.log/.txt` file
-- `GET /analytics` -> distributions, heatmap data, trends, clustering, git insights
-  - Optional query params: `source=auto|uploaded|dataset`, `module_name=<module>`
-- `GET /evaluation-report` -> generates formal workflow-aligned evaluation report
-- `GET /demo-scenario` -> manual vs AI demo comparison
+- `GET /health`
+- `GET /runtime-status`
+  - Verifies XGBoost/SHAP/sentence-transformers availability and runtime readiness.
+- `POST /train`
+- `POST /parse-log`
+- `POST /predict`
+- `POST /predict-from-log`
+- `POST /upload-logs`
+- `GET /uploaded-metrics`
+- `GET /analytics?source=auto|uploaded|dataset&module_name=<module>`
+- `GET /evaluation-report?rows=<n>`
+- `GET /demo-scenario`
 
-## Workflow Alignment Features
+## Workflow-Aligned Features
 
-- Deduplication preprocessing for uploaded logs (`duplicates_removed` in upload response)
-- Tokenization and normalized signatures from parser
-- UVM/SVA/MODULE categorization
-- Prioritized failure list sorted by descending score
-- Categorized error summary and suggested debug starting points
-- Impact analysis (tests affected and module impact)
-- Related recent design/testbench change hints from git history
-- Dashboard module filter for analytics drilldown
+- Unique failure identification
+- UVM/SVA/module-wise categorization
+- Prioritized failure list (descending by score)
+- Categorized error summary
+- Suggested starting points for debug
+- Impact analysis (`tests_affected`, module impact)
+- Recent git change hints related to modules
+- Dashboard module filter for analytics
+- Deduplication and tokenization preprocessing
 
-## Generate Formal Evaluation Report
+## Formal Evaluation Report
 
-From CLI:
+Generate from CLI:
 
 ```bash
 python -m AI_Debug_Agent.evaluation_report --rows 12000
 ```
 
-Generated files:
+Artifacts:
 
 - `reports/workflow_evaluation_report.json`
 - `reports/workflow_evaluation_report.md`
 
-The report includes:
+Includes:
 
-- Reduction in debug effort
-- Clustering and categorization quality
-- Clarity of prioritization logic
-- Core model metrics (Precision/Recall/F1/NDCG)
-- Alternative ranking check (LambdaMART-style pairwise ranker via `XGBRanker`, if available)
-
-## Performance Mode (10k to 100k logs)
-
-- Use `POST /train` with:
-  - `{"row_count": 12000, "speed_profile": "fast"}`
-- Fast profile forces scalable feature settings:
-  - Early switch to TF-IDF for text features
-  - Larger vectorization capacity
-  - Batched model inference during log upload
-- For very large uploads (50k-100k), keep model trained with `speed_profile=fast` before using `/upload-logs`.
-
-## Priority Model + Score
-
-- Classifier predicts `High/Medium/Low`.
-- `priority_score` is computed from class probabilities into a 0-100 scale.
-- Suggested interpretation:
-  - `80-100`: urgent
-  - `50-79`: medium scheduling priority
-  - `<50`: low urgency / monitor
-
-## Explainability and Advanced Features
-
-- SHAP local explanation (if SHAP is available)
-- Top contributing features for each prediction
-- Root-cause suggestions by module/error/assertion pattern
-- Trend detection (module-level weekly slope)
-- Failure clustering (KMeans)
-- Git fix insight extraction (`git log`)
-
-## Evaluation Metrics
-
-Training reports:
-
-- Accuracy
-- Precision (weighted)
-- Recall (weighted)
-- F1 score (weighted)
-- NDCG (ranking quality)
-- Confusion matrix
-- Full per-class classification report
-
-## Hackathon Demo Flow
-
-- Manual flow: read logs -> inspect bug -> prioritize (`~30 min`)
-- AI flow: upload logs -> model scores + explains -> ranked output (`~10 sec`)
+- Debug effort reduction estimate
+- Clustering/categorization quality
+- Prioritization clarity
+- Model metrics: Accuracy, Precision, Recall, F1, NDCG
+- Optional learning-to-rank check (`XGBRanker`)
 
 ## Notes
 
-- If `sentence-transformers` model download is unavailable, the system falls back to TF-IDF text features.
-- `PrioritizationModelAgent` uses XGBoost when available; a sklearn gradient boosting fallback is included for resilience.
+- For large uploads, keep model trained in `fast` profile before calling `/upload-logs`.
+- SHAP explanations are used when available; otherwise feature-importance fallback is used.
+- If MiniLM cannot be loaded, TF-IDF fallback is used.
