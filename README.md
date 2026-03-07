@@ -25,34 +25,41 @@ This project provides:
 
 ```text
 rtl-verification/
-  AI_Debug_Agent/
-    __init__.py
-    config.py
-    data_ingestion_agent.py
-    log_parser_agent.py
-    feature_engineering_agent.py
-    prioritization_model_agent.py
-    explanation_agent.py
-    dashboard_api_agent.py
-    run_pipeline.py
-    evaluation_report.py
-    dashboard/
-      index.html
-      app.js
-      styles.css
-    dataset/
-      .gitkeep
-    models/
-      .gitkeep
-  backend/
-    main.py
-    model.py
-    parser.py
-    feature_engineering.py
-    explainability.py
-  dataset_builder.py
-  train_model.py
-  requirements.txt
+│
+├── AI_Debug_Agent/
+│   ├── __init__.py
+│   ├── config.py
+│   ├── data_ingestion_agent.py
+│   ├── log_parser_agent.py
+│   ├── feature_engineering_agent.py
+│   ├── prioritization_model_agent.py
+│   ├── explanation_agent.py
+│   ├── dashboard_api_agent.py
+│   ├── run_pipeline.py
+│   ├── evaluation_report.py
+│   │
+│   ├── dashboard/
+│   │   ├── index.html
+│   │   ├── app.js
+│   │   └── styles.css
+│   │
+│   ├── dataset/
+│   │   └── .gitkeep
+│   │
+│   └── models/
+│       └── .gitkeep
+│
+├── backend/
+│   ├── main.py
+│   ├── model.py
+│   ├── parser.py
+│   ├── feature_engineering.py
+│   └── explainability.py
+│
+├── dataset_builder.py
+├── train_model.py
+├── requirements.txt
+└── README.md
 ```
 
 ## Setup
